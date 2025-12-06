@@ -45,10 +45,13 @@ class DirectoryTreeViewer:
         self.refresh_path = None
         self.refresh_new_total_size = 0
         self.refresh_new_exclusive_size = 0
-        
+
         # Statistics
         self.scan_start_time = None
         self.total_processed = 0
+
+        # Performance optimization
+        self.affected_parents = set()  # Track parents that need sorting after batch
         
         self.create_widgets()
     
@@ -157,6 +160,7 @@ class DirectoryTreeViewer:
         self.node_exclusive_sizes.clear()
         self.total_processed = 0
         self.scan_root = os.path.normpath(path)
+        self.affected_parents.clear()
         
         # Setup multiprocessing
         self.result_queue = Queue()
@@ -177,9 +181,9 @@ class DirectoryTreeViewer:
         
         self.scan_start_time = None
         self.status_var.set("Starting scan...")
-        
+
         # Start polling queue
-        self.root.after(50, self.poll_queue)
+        self.root.after(20, self.poll_queue)
     
     def stop_scan(self):
         """Stop the scanning process."""
@@ -191,46 +195,52 @@ class DirectoryTreeViewer:
         """Poll queue for results from scanner process."""
         if self.result_queue is None:
             return
-        
-        # Process all available items in queue
-        items_processed = 0
-        max_items_per_poll = 10  # Process up to 10 batches per poll
-        
-        while items_processed < max_items_per_poll:
-            try:
-                result = self.result_queue.get_nowait()
-                
-                if result == 'DONE':
-                    self.finish_scan(success=True)
-                    return
-                elif isinstance(result, tuple) and result[0] == 'START':
-                    self.scan_start_time = __import__('time').perf_counter()
-                    self.status_var.set(f"Scanning: {result[1]}")
-                elif isinstance(result, tuple) and result[0] == 'ERROR':
-                    self.finish_scan(success=False, error=result[1])
-                    return
-                elif isinstance(result, list):
-                    # Process batch of (path, size) tuples
-                    self.process_batch(result)
-                    items_processed += 1
-                
-            except:
-                # Queue empty
-                break
-        
-        # Continue polling if scan is active
-        if self.scanner_process and self.scanner_process.is_alive():
-            self.root.after(50, self.poll_queue)
-        else:
-            # Process ended unexpectedly
-            self.finish_scan(success=False, error="Scanner process ended unexpectedly")
+
+        # Process only ONE batch per poll for smoother updates
+        try:
+            result = self.result_queue.get_nowait()
+
+            if result == 'DONE':
+                self.finish_scan(success=True)
+                return
+            elif isinstance(result, tuple) and result[0] == 'START':
+                self.scan_start_time = __import__('time').perf_counter()
+                self.status_var.set(f"Scanning: {result[1]}")
+            elif isinstance(result, tuple) and result[0] == 'ERROR':
+                self.finish_scan(success=False, error=result[1])
+                return
+            elif isinstance(result, list):
+                # Process batch of (path, size) tuples
+                self.process_batch(result)
+
+        except:
+            # Queue empty - this is normal
+            pass
+
+        # Continue polling if scan is active OR if process just finished (queue may still have items)
+        if self.scanner_process:
+            if self.scanner_process.is_alive():
+                # Scanner still running - keep polling
+                self.root.after(20, self.poll_queue)
+            else:
+                # Scanner finished - poll a few more times to drain queue
+                # The 'DONE' message should arrive soon
+                self.root.after(20, self.poll_queue)
     
     def process_batch(self, batch):
         """Process a batch of (path, size) tuples."""
+        # Clear affected parents from previous batch
+        self.affected_parents.clear()
+
+        # Process all nodes in batch
         for path, size in batch:
             self.add_or_update_node(path, size)
             self.total_processed += 1
-        
+
+        # Sort all affected parents once after batch is processed
+        for parent_id in self.affected_parents:
+            self.sort_children(parent_id)
+
         # Update status
         elapsed = __import__('time').perf_counter() - self.scan_start_time if self.scan_start_time else 0
         self.status_var.set(f"Scanning... {self.total_processed:,} directories processed ({elapsed:.1f}s)")
@@ -316,9 +326,10 @@ class DirectoryTreeViewer:
         """Update the display of a node with new sizes."""
         self.tree.item(node_id, values=(format_size(total_size), format_size(exclusive_size), total_size, exclusive_size))
 
-        # Sort siblings by total size (descending)
+        # Track parent for batch sorting (sorted once per batch in process_batch)
         parent_id = self.tree.parent(node_id)
-        self.sort_children(parent_id)
+        if parent_id or parent_id == '':  # Include root children
+            self.affected_parents.add(parent_id)
     
     def sort_children(self, parent_id):
         """Sort children of a parent node by total size (descending)."""
@@ -605,24 +616,28 @@ class DirectoryTreeViewer:
             if self.scanner_process.is_alive():
                 self.scanner_process.terminate()
             self.scanner_process = None
-        
+
         # Cleanup queue
         self.result_queue = None
         self.stop_event = None
-        
+
+        # Clear affected parents tracking
+        self.affected_parents.clear()
+
         # Update UI state
         self.scan_btn.config(state=tk.NORMAL)
         self.browse_btn.config(state=tk.NORMAL)
         self.path_entry.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
-        
+
         # Update status
         if success:
             elapsed = __import__('time').perf_counter() - self.scan_start_time if self.scan_start_time else 0
             self.status_var.set(f"Scan complete! {self.total_processed:,} directories processed in {elapsed:.2f}s")
         else:
             self.status_var.set(f"Scan failed: {error if error else 'Unknown error'}")
-            messagebox.showerror("Scan Error", f"An error occurred during scanning:\n{error}")
+            if error:
+                messagebox.showerror("Scan Error", f"An error occurred during scanning:\n{error}")
 
 
 def main():
