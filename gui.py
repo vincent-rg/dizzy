@@ -5,6 +5,8 @@ Displays directory tree with sizes using tkinter.
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
+import subprocess
+import platform
 from multiprocessing import Process, Queue, Event
 from scanner import scan_directory_tree
 
@@ -31,6 +33,7 @@ class DirectoryTreeViewer:
         self.path_to_node = {}  # Maps path -> tree node id
         self.node_sizes = {}    # Maps node id -> current total size
         self.node_exclusive_sizes = {}  # Maps node id -> exclusive size (files only at this level)
+        self.scan_root = None  # The root directory being scanned
         
         # Multiprocessing
         self.result_queue = None
@@ -107,9 +110,17 @@ class DirectoryTreeViewer:
         self.tree.column('exclusive_size', width=150, anchor=tk.E)
         self.tree.column('total_size_bytes', width=0, stretch=False)  # Hidden column for sorting
         self.tree.column('exclusive_size_bytes', width=0, stretch=False)  # Hidden column for sorting
-        
+
         # Configure tags for styling
-        self.tree.tag_configure('directory', foreground='#0066cc')
+        self.tree.tag_configure('directory', foreground='#000000')
+
+        # Context menu
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="Browse Folder", command=self.browse_folder_context)
+        self.context_menu.add_command(label="Refresh", command=self.refresh_folder_context)
+
+        # Bind right-click
+        self.tree.bind("<Button-3>", self.show_context_menu)
     
     def browse_directory(self):
         """Open directory browser dialog."""
@@ -139,6 +150,7 @@ class DirectoryTreeViewer:
         self.node_sizes.clear()
         self.node_exclusive_sizes.clear()
         self.total_processed = 0
+        self.scan_root = os.path.normpath(path)
         
         # Setup multiprocessing
         self.result_queue = Queue()
@@ -248,26 +260,42 @@ class DirectoryTreeViewer:
         self.propagate_size_to_ancestors(path, exclusive_size)
     
     def create_node(self, path):
-        """Create a node and all its missing ancestors."""
+        """Create a node and all its missing ancestors up to scan_root."""
         # Check if already exists
         if path in self.path_to_node:
             return self.path_to_node[path]
-        
+
+        # Normalize path
+        path = os.path.normpath(path)
+
+        # If this is the scan root, create it at tree root
+        if path == self.scan_root:
+            # Root node shows full path
+            node_id = self.tree.insert('', 'end', text=path, values=('0 B', '0 B', 0, 0), tags=('directory',))
+            self.path_to_node[path] = node_id
+            self.node_sizes[node_id] = 0
+            self.node_exclusive_sizes[node_id] = 0
+            return node_id
+
         # Get parent path
         parent_path = os.path.dirname(path)
-        
-        # Create parent if needed and not at root
+
+        # Check if path is within scan_root
+        if not path.startswith(self.scan_root):
+            # This shouldn't happen, but handle gracefully
+            return None
+
+        # Create parent if needed
         if parent_path and parent_path != path:
             parent_id = self.create_node(parent_path)
+            if parent_id is None:
+                return None
         else:
             parent_id = ''
-        
-        # Get display name
-        if parent_path and parent_path != path:
-            name = os.path.basename(path)
-        else:
-            name = path  # Root node shows full path
-        
+
+        # Get display name (just the folder name, not full path)
+        name = os.path.basename(path)
+
         # Create tree node
         node_id = self.tree.insert(parent_id, 'end', text=name, values=('0 B', '0 B', 0, 0), tags=('directory',))
 
@@ -275,7 +303,7 @@ class DirectoryTreeViewer:
         self.path_to_node[path] = node_id
         self.node_sizes[node_id] = 0
         self.node_exclusive_sizes[node_id] = 0
-        
+
         return node_id
     
     def update_node_display(self, node_id, total_size, exclusive_size):
@@ -312,6 +340,10 @@ class DirectoryTreeViewer:
         while True:
             parent_path = os.path.dirname(current_path)
 
+            # Stop if we're at the scan root
+            if current_path == self.scan_root:
+                break
+
             # Stop if we're at the root or no parent
             if not parent_path or parent_path == current_path:
                 break
@@ -328,7 +360,174 @@ class DirectoryTreeViewer:
                 self.update_node_display(parent_id, new_total_size, exclusive_size)
 
             current_path = parent_path
-    
+
+    def show_context_menu(self, event):
+        """Show context menu on right-click."""
+        # Select the item under cursor
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.tree.selection_set(item)
+            self.context_menu.post(event.x_root, event.y_root)
+
+    def get_path_from_node(self, node_id):
+        """Get the full path from a tree node."""
+        # Find the path by looking up in our path_to_node mapping
+        for path, nid in self.path_to_node.items():
+            if nid == node_id:
+                return path
+        return None
+
+    def browse_folder_context(self):
+        """Open file explorer at the selected folder."""
+        selection = self.tree.selection()
+        if not selection:
+            return
+
+        node_id = selection[0]
+        path = self.get_path_from_node(node_id)
+
+        if path and os.path.exists(path):
+            try:
+                if platform.system() == 'Windows':
+                    os.startfile(path)
+                elif platform.system() == 'Darwin':  # macOS
+                    subprocess.Popen(['open', path])
+                else:  # Linux
+                    subprocess.Popen(['xdg-open', path])
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to open folder:\n{e}")
+
+    def refresh_folder_context(self):
+        """Refresh the selected folder by rescanning it."""
+        selection = self.tree.selection()
+        if not selection:
+            return
+
+        node_id = selection[0]
+        path = self.get_path_from_node(node_id)
+
+        if not path or not os.path.exists(path):
+            messagebox.showerror("Error", "Folder no longer exists")
+            return
+
+        if not os.path.isdir(path):
+            messagebox.showerror("Error", "Not a directory")
+            return
+
+        # Store old size to calculate delta
+        old_total_size = self.node_sizes.get(node_id, 0)
+        old_exclusive_size = self.node_exclusive_sizes.get(node_id, 0)
+
+        # Remove all children
+        children = self.tree.get_children(node_id)
+        for child in children:
+            self.remove_node_recursive(child)
+
+        # Rescan the directory
+        result_queue = Queue()
+        stop_event = Event()
+
+        scanner_process = Process(
+            target=scan_directory_tree,
+            args=(path, result_queue, stop_event)
+        )
+        scanner_process.start()
+
+        # Process results synchronously
+        new_total_size = 0
+        new_exclusive_size = 0
+
+        while True:
+            try:
+                result = result_queue.get(timeout=1.0)
+
+                if result == 'DONE':
+                    break
+                elif isinstance(result, tuple) and result[0] == 'START':
+                    continue
+                elif isinstance(result, tuple) and result[0] == 'ERROR':
+                    messagebox.showerror("Scan Error", f"Error scanning folder:\n{result[1]}")
+                    scanner_process.join()
+                    return
+                elif isinstance(result, list):
+                    # Process batch
+                    for scan_path, exclusive_size in result:
+                        scan_path = os.path.normpath(scan_path)
+
+                        if scan_path == path:
+                            # This is the root of the refresh
+                            new_exclusive_size += exclusive_size
+                            new_total_size += exclusive_size
+                        else:
+                            # Subdirectory - add as child
+                            self.add_or_update_node(scan_path, exclusive_size)
+                            new_total_size += exclusive_size
+
+            except:
+                # Timeout or queue empty
+                if not scanner_process.is_alive():
+                    break
+
+        scanner_process.join()
+
+        # Update the refreshed node's sizes
+        self.node_sizes[node_id] = new_total_size
+        self.node_exclusive_sizes[node_id] = new_exclusive_size
+        self.update_node_display(node_id, new_total_size, new_exclusive_size)
+
+        # Recompute ancestors' total sizes from scratch
+        self.recompute_ancestors_total_size(path)
+
+    def recompute_ancestors_total_size(self, path):
+        """Recompute total sizes for all ancestors by summing children."""
+        current_path = path
+
+        while True:
+            parent_path = os.path.dirname(current_path)
+
+            # Stop if we're at the scan root
+            if current_path == self.scan_root:
+                break
+
+            # Stop if we're at the root or no parent
+            if not parent_path or parent_path == current_path:
+                break
+
+            if parent_path in self.path_to_node:
+                parent_id = self.path_to_node[parent_path]
+
+                # Recompute parent's total size from exclusive size + all children
+                parent_exclusive = self.node_exclusive_sizes.get(parent_id, 0)
+                children_total = 0
+
+                for child_id in self.tree.get_children(parent_id):
+                    children_total += self.node_sizes.get(child_id, 0)
+
+                new_parent_total = parent_exclusive + children_total
+                self.node_sizes[parent_id] = new_parent_total
+                self.update_node_display(parent_id, new_parent_total, parent_exclusive)
+
+            current_path = parent_path
+
+    def remove_node_recursive(self, node_id):
+        """Remove a node and all its descendants from tracking."""
+        # Get path for this node
+        path = self.get_path_from_node(node_id)
+
+        # Remove all children first
+        children = self.tree.get_children(node_id)
+        for child in children:
+            self.remove_node_recursive(child)
+
+        # Remove from tree
+        self.tree.delete(node_id)
+
+        # Remove from tracking
+        if path:
+            self.path_to_node.pop(path, None)
+        self.node_sizes.pop(node_id, None)
+        self.node_exclusive_sizes.pop(node_id, None)
+
     def finish_scan(self, success=True, error=None):
         """Finish the scan and cleanup."""
         # Cleanup process
