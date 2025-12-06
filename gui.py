@@ -39,6 +39,12 @@ class DirectoryTreeViewer:
         self.result_queue = None
         self.scanner_process = None
         self.stop_event = None
+
+        # Refresh state
+        self.refresh_node_id = None
+        self.refresh_path = None
+        self.refresh_new_total_size = 0
+        self.refresh_new_exclusive_size = 0
         
         # Statistics
         self.scan_start_time = None
@@ -398,7 +404,7 @@ class DirectoryTreeViewer:
                 messagebox.showerror("Error", f"Failed to open folder:\n{e}")
 
     def refresh_folder_context(self):
-        """Refresh the selected folder by rescanning it."""
+        """Refresh the selected folder by rescanning it (async)."""
         selection = self.tree.selection()
         if not selection:
             return
@@ -414,69 +420,129 @@ class DirectoryTreeViewer:
             messagebox.showerror("Error", "Not a directory")
             return
 
-        # Store old size to calculate delta
-        old_total_size = self.node_sizes.get(node_id, 0)
-        old_exclusive_size = self.node_exclusive_sizes.get(node_id, 0)
+        # Don't allow refresh during active scan
+        if self.scanner_process and self.scanner_process.is_alive():
+            messagebox.showwarning("Scan in Progress", "Cannot refresh while a scan is running")
+            return
+
+        # Store refresh state
+        self.refresh_node_id = node_id
+        self.refresh_path = path
+        self.refresh_new_total_size = 0
+        self.refresh_new_exclusive_size = 0
 
         # Remove all children
         children = self.tree.get_children(node_id)
         for child in children:
             self.remove_node_recursive(child)
 
-        # Rescan the directory
-        result_queue = Queue()
-        stop_event = Event()
+        # Setup multiprocessing
+        self.result_queue = Queue()
+        self.stop_event = Event()
 
-        scanner_process = Process(
+        # Start scanner process
+        self.scanner_process = Process(
             target=scan_directory_tree,
-            args=(path, result_queue, stop_event)
+            args=(path, self.result_queue, self.stop_event)
         )
-        scanner_process.start()
+        self.scanner_process.start()
 
-        # Process results synchronously
-        new_total_size = 0
-        new_exclusive_size = 0
+        # Disable scan controls during refresh
+        self.scan_btn.config(state=tk.DISABLED)
+        self.browse_btn.config(state=tk.DISABLED)
+        self.path_entry.config(state=tk.DISABLED)
 
-        while True:
+        self.status_var.set(f"Refreshing: {path}")
+
+        # Start async polling
+        self.root.after(50, self.poll_refresh_queue)
+
+    def poll_refresh_queue(self):
+        """Poll queue for results from refresh operation."""
+        if self.result_queue is None:
+            return
+
+        # Process all available items in queue
+        items_processed = 0
+        max_items_per_poll = 10
+
+        while items_processed < max_items_per_poll:
             try:
-                result = result_queue.get(timeout=1.0)
+                result = self.result_queue.get_nowait()
 
                 if result == 'DONE':
-                    break
+                    self.finish_refresh()
+                    return
                 elif isinstance(result, tuple) and result[0] == 'START':
                     continue
                 elif isinstance(result, tuple) and result[0] == 'ERROR':
-                    messagebox.showerror("Scan Error", f"Error scanning folder:\n{result[1]}")
-                    scanner_process.join()
+                    self.finish_refresh(success=False, error=result[1])
                     return
                 elif isinstance(result, list):
-                    # Process batch
+                    # Process batch of (path, size) tuples
                     for scan_path, exclusive_size in result:
                         scan_path = os.path.normpath(scan_path)
 
-                        if scan_path == path:
+                        if scan_path == self.refresh_path:
                             # This is the root of the refresh
-                            new_exclusive_size += exclusive_size
-                            new_total_size += exclusive_size
+                            self.refresh_new_exclusive_size += exclusive_size
+                            self.refresh_new_total_size += exclusive_size
                         else:
                             # Subdirectory - add as child
                             self.add_or_update_node(scan_path, exclusive_size)
-                            new_total_size += exclusive_size
+                            self.refresh_new_total_size += exclusive_size
+
+                    items_processed += 1
 
             except:
-                # Timeout or queue empty
-                if not scanner_process.is_alive():
-                    break
+                # Queue empty
+                break
 
-        scanner_process.join()
+        # Continue polling if scan is active
+        if self.scanner_process and self.scanner_process.is_alive():
+            self.root.after(50, self.poll_refresh_queue)
+        else:
+            # Process ended unexpectedly
+            self.finish_refresh(success=False, error="Refresh process ended unexpectedly")
 
-        # Update the refreshed node's sizes
-        self.node_sizes[node_id] = new_total_size
-        self.node_exclusive_sizes[node_id] = new_exclusive_size
-        self.update_node_display(node_id, new_total_size, new_exclusive_size)
+    def finish_refresh(self, success=True, error=None):
+        """Finish the refresh operation and cleanup."""
+        # Cleanup process
+        if self.scanner_process:
+            self.scanner_process.join(timeout=1.0)
+            if self.scanner_process.is_alive():
+                self.scanner_process.terminate()
+            self.scanner_process = None
 
-        # Recompute ancestors' total sizes from scratch
-        self.recompute_ancestors_total_size(path)
+        # Cleanup queue
+        self.result_queue = None
+        self.stop_event = None
+
+        # Update UI state
+        self.scan_btn.config(state=tk.NORMAL)
+        self.browse_btn.config(state=tk.NORMAL)
+        self.path_entry.config(state=tk.NORMAL)
+
+        if success:
+            # Update the refreshed node's sizes
+            self.node_sizes[self.refresh_node_id] = self.refresh_new_total_size
+            self.node_exclusive_sizes[self.refresh_node_id] = self.refresh_new_exclusive_size
+            self.update_node_display(self.refresh_node_id, self.refresh_new_total_size, self.refresh_new_exclusive_size)
+
+            # Recompute ancestors' total sizes from scratch
+            self.recompute_ancestors_total_size(self.refresh_path)
+
+            self.status_var.set(f"Refresh complete: {self.refresh_path}")
+        else:
+            self.status_var.set(f"Refresh failed: {error if error else 'Unknown error'}")
+            if error:
+                messagebox.showerror("Refresh Error", f"An error occurred during refresh:\n{error}")
+
+        # Clear refresh state
+        self.refresh_node_id = None
+        self.refresh_path = None
+        self.refresh_new_total_size = 0
+        self.refresh_new_exclusive_size = 0
 
     def recompute_ancestors_total_size(self, path):
         """Recompute total sizes for all ancestors by summing children."""
