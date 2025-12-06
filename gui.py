@@ -420,9 +420,12 @@ class DirectoryTreeViewer:
             messagebox.showerror("Error", "Not a directory")
             return
 
-        # Don't allow refresh during active scan
+        # Don't allow refresh during active scan or another refresh
         if self.scanner_process and self.scanner_process.is_alive():
-            messagebox.showwarning("Scan in Progress", "Cannot refresh while a scan is running")
+            if self.refresh_node_id is not None:
+                messagebox.showwarning("Refresh in Progress", "Cannot refresh while another refresh is running")
+            else:
+                messagebox.showwarning("Scan in Progress", "Cannot refresh while a scan is running")
             return
 
         # Store refresh state
