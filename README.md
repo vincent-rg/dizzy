@@ -135,7 +135,7 @@ gui.py        - GUI implementation (tkinter tree widget)
 - Very deep directory hierarchies (1000+ levels) may hit recursion limits
 - No filtering options yet
 - Tree only shows scanned directory and its children (no ancestor nodes)
-- Cannot refresh while a scan is in progress
+- Cannot refresh while a scan or another refresh is in progress
 
 ## Future Enhancements
 
