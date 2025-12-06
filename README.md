@@ -116,11 +116,12 @@ gui.py        - GUI implementation (tkinter tree widget)
 
 ### GUI Process
 - Tkinter Treeview widget with two size columns
-- Polls queue every 50ms
+- Polls queue every 20ms for smooth real-time updates
+- Processes 1 batch per poll to prevent GUI blocking
 - Creates tree nodes on-demand (only within scan root)
 - Tracks both total size and exclusive size for each directory
 - Propagates total sizes up ancestor chain
-- Automatically sorts children by total size (descending)
+- Sorts once per batch for optimal performance (avoids sorting on every node)
 - Formats sizes in human-readable format (B, KB, MB, GB, TB)
 - Right-click context menu for folder operations
 - Refresh functionality recomputes ancestor sizes correctly
