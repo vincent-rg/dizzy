@@ -6,8 +6,14 @@ A fast, real-time directory size analysis tool built with Python's standard libr
 
 - **Fast scanning**: Uses `os.scandir()` for efficient directory traversal (3x faster than `dir /s` on Windows!)
 - **Real-time updates**: See the tree build as scanning progresses
+- **Two size metrics**: Shows both total size (including subdirectories) and exclusive size (files only at each level)
+- **Automatic sorting**: Directories automatically sorted by size (largest first) during scanning
+- **Right-click context menu**:
+  - Browse folder in file explorer
+  - Refresh individual folders to rescan them
 - **Safe**: Does not follow symbolic links (prevents infinite loops)
 - **Multi-process**: Scanner and GUI run in separate processes to avoid blocking
+- **Cross-platform**: Works on Windows, macOS, and Linux
 - **Standard library only**: No external dependencies required
 
 ## Performance
@@ -39,7 +45,11 @@ No installation needed! Just copy the files:
 2. Use the GUI:
    - Click **Browse** or type a path directly
    - Click **Scan** to start analyzing
-   - Watch the tree build in real-time
+   - Watch the tree build in real-time with automatic sorting
+   - View **Total Size** (includes all subdirectories) and **Exclusive Size** (files only at each level)
+   - Right-click any folder to:
+     - **Browse Folder**: Open it in your file explorer
+     - **Refresh**: Rescan just that folder to update its contents
    - Click **Stop** to cancel a scan in progress
 
 ## How It Works
@@ -105,11 +115,15 @@ gui.py        - GUI implementation (tkinter tree widget)
 - Gracefully handles permission errors
 
 ### GUI Process
-- Tkinter Treeview widget
+- Tkinter Treeview widget with two size columns
 - Polls queue every 50ms
-- Creates tree nodes on-demand
-- Propagates sizes up ancestor chain
-- Formats sizes in human-readable format
+- Creates tree nodes on-demand (only within scan root)
+- Tracks both total size and exclusive size for each directory
+- Propagates total sizes up ancestor chain
+- Automatically sorts children by total size (descending)
+- Formats sizes in human-readable format (B, KB, MB, GB, TB)
+- Right-click context menu for folder operations
+- Refresh functionality recomputes ancestor sizes correctly
 
 ### Inter-Process Communication
 - `multiprocessing.Queue` for data transfer
@@ -118,20 +132,22 @@ gui.py        - GUI implementation (tkinter tree widget)
 
 ## Known Limitations
 
-- Windows only tested (but should work on Linux/Mac)
 - Very deep directory hierarchies (1000+ levels) may hit recursion limits
-- No sort functionality yet
+- Refresh operation is synchronous and may freeze UI for large directories
 - No filtering options yet
+- Tree only shows scanned directory and its children (no ancestor nodes)
 
 ## Future Enhancements
 
 Possible improvements:
-- Sort by size/name
-- Filter by file types
+- Async refresh operation to prevent UI freezing
+- Filter by file types or size thresholds
 - Export to CSV/JSON
 - Search functionality
 - Directory comparison mode
 - Duplicate file detection
+- Manual column sorting (currently auto-sorts by total size)
+- Size change indicators after refresh
 
 ## Troubleshooting
 
