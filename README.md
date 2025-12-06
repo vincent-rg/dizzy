@@ -133,14 +133,13 @@ gui.py        - GUI implementation (tkinter tree widget)
 ## Known Limitations
 
 - Very deep directory hierarchies (1000+ levels) may hit recursion limits
-- Refresh operation is synchronous and may freeze UI for large directories
 - No filtering options yet
 - Tree only shows scanned directory and its children (no ancestor nodes)
+- Cannot refresh while a scan is in progress
 
 ## Future Enhancements
 
 Possible improvements:
-- Async refresh operation to prevent UI freezing
 - Filter by file types or size thresholds
 - Export to CSV/JSON
 - Search functionality
@@ -148,6 +147,7 @@ Possible improvements:
 - Duplicate file detection
 - Manual column sorting (currently auto-sorts by total size)
 - Size change indicators after refresh
+- Allow concurrent refresh of multiple folders
 
 ## Troubleshooting
 
