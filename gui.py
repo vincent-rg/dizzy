@@ -481,6 +481,10 @@ class DirectoryTreeViewer:
         self.refresh_new_total_size = 0
         self.refresh_new_exclusive_size = 0
 
+        # Reset the refresh node's sizes to 0 before rescanning
+        self.node_sizes[node_id] = 0
+        self.node_exclusive_sizes[node_id] = 0
+
         # Mark all descendant paths as deleted (fast - just set sentinel value)
         # This invalidates the old node IDs without expensive removal
         for p in list(self.path_to_node.keys()):
