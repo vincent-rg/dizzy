@@ -12,8 +12,8 @@ from scanner import scan_directory_tree
 from enum import Enum
 import logging
 
-# Setup logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# Setup logging (WARNING level for production)
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 class ScanMode(Enum):
@@ -273,60 +273,6 @@ class DirectoryTreeViewer:
         if self.scanner_process:
             self.root.after(20, self.poll_scanner_queue)
 
-    def poll_queue(self):
-        """Poll queue for results from scanner process."""
-        if self.result_queue is None:
-            return
-
-        # Process only ONE batch per poll for smoother updates
-        try:
-            result = self.result_queue.get_nowait()
-
-            if result == 'DONE':
-                self.finish_scan(success=True)
-                return
-            elif isinstance(result, tuple) and result[0] == 'START':
-                self.scan_start_time = __import__('time').perf_counter()
-                self.status_var.set(f"Scanning: {result[1]}")
-            elif isinstance(result, tuple) and result[0] == 'ERROR':
-                self.finish_scan(success=False, error=result[1])
-                return
-            elif isinstance(result, list):
-                # Process batch of (path, size) tuples
-                self.process_batch(result)
-
-        except:
-            # Queue empty - this is normal
-            pass
-
-        # Continue polling if scan is active OR if process just finished (queue may still have items)
-        if self.scanner_process:
-            if self.scanner_process.is_alive():
-                # Scanner still running - keep polling
-                self.root.after(20, self.poll_queue)
-            else:
-                # Scanner finished - poll a few more times to drain queue
-                # The 'DONE' message should arrive soon
-                self.root.after(20, self.poll_queue)
-    
-    def process_batch(self, batch):
-        """Process a batch of (path, size) tuples."""
-        # Clear affected parents from previous batch
-        self.affected_parents.clear()
-
-        # Process all nodes in batch
-        for path, size in batch:
-            self.add_or_update_node(path, size)
-            self.total_processed += 1
-
-        # Sort all affected parents once after batch is processed
-        for parent_id in self.affected_parents:
-            self.sort_children(parent_id)
-
-        # Update status
-        elapsed = __import__('time').perf_counter() - self.scan_start_time if self.scan_start_time else 0
-        self.status_var.set(f"Scanning... {self.total_processed:,} directories processed ({elapsed:.1f}s)")
-    
     def add_or_update_node(self, path, exclusive_size):
         """
         Add or update a node in the tree.
@@ -576,58 +522,6 @@ class DirectoryTreeViewer:
         logging.info("Scheduling first poll_scanner_queue call")
         self.root.after(20, self.poll_scanner_queue)
 
-    def poll_refresh_queue(self):
-        """Poll queue for results from refresh operation."""
-        if self.result_queue is None:
-            return
-
-        # Process only ONE batch per poll for smoother updates
-        try:
-            result = self.result_queue.get_nowait()
-
-            if result == 'DONE':
-                self.finish_refresh()
-                return
-            elif isinstance(result, tuple) and result[0] == 'START':
-                pass  # Ignore START message
-            elif isinstance(result, tuple) and result[0] == 'ERROR':
-                self.finish_refresh(success=False, error=result[1])
-                return
-            elif isinstance(result, list):
-                # Clear affected parents for batch sorting
-                self.affected_parents.clear()
-
-                # Process batch of (path, size) tuples
-                for scan_path, exclusive_size in result:
-                    scan_path = os.path.normpath(scan_path)
-
-                    if scan_path == self.refresh_path:
-                        # This is the root of the refresh
-                        self.refresh_new_exclusive_size += exclusive_size
-                        self.refresh_new_total_size += exclusive_size
-                    else:
-                        # Subdirectory - add as child
-                        self.add_or_update_node(scan_path, exclusive_size)
-                        self.refresh_new_total_size += exclusive_size
-
-                # Sort all affected parents once after batch
-                for parent_id in self.affected_parents:
-                    self.sort_children(parent_id)
-
-        except:
-            # Queue empty - this is normal
-            pass
-
-        # Continue polling if scan is active OR if process just finished (queue may still have items)
-        if self.scanner_process:
-            if self.scanner_process.is_alive():
-                # Scanner still running - keep polling
-                self.root.after(20, self.poll_refresh_queue)
-            else:
-                # Scanner finished - poll a few more times to drain queue
-                # The 'DONE' message should arrive soon
-                self.root.after(20, self.poll_refresh_queue)
-
     def finish_refresh(self, success=True, error=None):
         """Finish the refresh operation and cleanup."""
         logging.info(f"Finishing refresh, success={success}")
@@ -702,25 +596,6 @@ class DirectoryTreeViewer:
                 self.update_node_display(parent_id, new_parent_total, parent_exclusive)
 
             current_path = parent_path
-
-    def remove_node_recursive(self, node_id):
-        """Remove a node and all its descendants from tracking."""
-        # Get path for this node
-        path = self.get_path_from_node(node_id)
-
-        # Remove all children first
-        children = self.tree.get_children(node_id)
-        for child in children:
-            self.remove_node_recursive(child)
-
-        # Remove from tree
-        self.tree.delete(node_id)
-
-        # Remove from tracking
-        if path:
-            self.path_to_node.pop(path, None)
-        self.node_sizes.pop(node_id, None)
-        self.node_exclusive_sizes.pop(node_id, None)
 
     def finish_scan(self, success=True, error=None):
         """Finish the scan and cleanup."""
