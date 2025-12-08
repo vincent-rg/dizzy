@@ -469,55 +469,59 @@ class DirectoryTreeViewer:
         self.status_var.set(f"Refreshing: {path}")
 
         # Start async polling
-        self.root.after(50, self.poll_refresh_queue)
+        self.root.after(20, self.poll_refresh_queue)
 
     def poll_refresh_queue(self):
         """Poll queue for results from refresh operation."""
         if self.result_queue is None:
             return
 
-        # Process all available items in queue
-        items_processed = 0
-        max_items_per_poll = 10
+        # Process only ONE batch per poll for smoother updates
+        try:
+            result = self.result_queue.get_nowait()
 
-        while items_processed < max_items_per_poll:
-            try:
-                result = self.result_queue.get_nowait()
+            if result == 'DONE':
+                self.finish_refresh()
+                return
+            elif isinstance(result, tuple) and result[0] == 'START':
+                pass  # Ignore START message
+            elif isinstance(result, tuple) and result[0] == 'ERROR':
+                self.finish_refresh(success=False, error=result[1])
+                return
+            elif isinstance(result, list):
+                # Clear affected parents for batch sorting
+                self.affected_parents.clear()
 
-                if result == 'DONE':
-                    self.finish_refresh()
-                    return
-                elif isinstance(result, tuple) and result[0] == 'START':
-                    continue
-                elif isinstance(result, tuple) and result[0] == 'ERROR':
-                    self.finish_refresh(success=False, error=result[1])
-                    return
-                elif isinstance(result, list):
-                    # Process batch of (path, size) tuples
-                    for scan_path, exclusive_size in result:
-                        scan_path = os.path.normpath(scan_path)
+                # Process batch of (path, size) tuples
+                for scan_path, exclusive_size in result:
+                    scan_path = os.path.normpath(scan_path)
 
-                        if scan_path == self.refresh_path:
-                            # This is the root of the refresh
-                            self.refresh_new_exclusive_size += exclusive_size
-                            self.refresh_new_total_size += exclusive_size
-                        else:
-                            # Subdirectory - add as child
-                            self.add_or_update_node(scan_path, exclusive_size)
-                            self.refresh_new_total_size += exclusive_size
+                    if scan_path == self.refresh_path:
+                        # This is the root of the refresh
+                        self.refresh_new_exclusive_size += exclusive_size
+                        self.refresh_new_total_size += exclusive_size
+                    else:
+                        # Subdirectory - add as child
+                        self.add_or_update_node(scan_path, exclusive_size)
+                        self.refresh_new_total_size += exclusive_size
 
-                    items_processed += 1
+                # Sort all affected parents once after batch
+                for parent_id in self.affected_parents:
+                    self.sort_children(parent_id)
 
-            except:
-                # Queue empty
-                break
+        except:
+            # Queue empty - this is normal
+            pass
 
-        # Continue polling if scan is active
-        if self.scanner_process and self.scanner_process.is_alive():
-            self.root.after(50, self.poll_refresh_queue)
-        else:
-            # Process ended unexpectedly
-            self.finish_refresh(success=False, error="Refresh process ended unexpectedly")
+        # Continue polling if scan is active OR if process just finished (queue may still have items)
+        if self.scanner_process:
+            if self.scanner_process.is_alive():
+                # Scanner still running - keep polling
+                self.root.after(20, self.poll_refresh_queue)
+            else:
+                # Scanner finished - poll a few more times to drain queue
+                # The 'DONE' message should arrive soon
+                self.root.after(20, self.poll_refresh_queue)
 
     def finish_refresh(self, success=True, error=None):
         """Finish the refresh operation and cleanup."""
