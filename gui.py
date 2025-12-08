@@ -9,6 +9,18 @@ import subprocess
 import platform
 from multiprocessing import Process, Queue, Event
 from scanner import scan_directory_tree
+from enum import Enum
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+class ScanMode(Enum):
+    """Mode for scanning operations."""
+    IDLE = "idle"
+    INITIAL_SCAN = "initial_scan"
+    REFRESH = "refresh"
 
 
 def format_size(bytes_size):
@@ -39,6 +51,7 @@ class DirectoryTreeViewer:
         self.result_queue = None
         self.scanner_process = None
         self.stop_event = None
+        self.scan_mode = ScanMode.IDLE
 
         # Refresh state
         self.refresh_node_id = None
@@ -172,25 +185,94 @@ class DirectoryTreeViewer:
             args=(path, self.result_queue, self.stop_event)
         )
         self.scanner_process.start()
-        
+        self.scan_mode = ScanMode.INITIAL_SCAN
+
         # Update UI state
         self.scan_btn.config(state=tk.DISABLED)
         self.browse_btn.config(state=tk.DISABLED)
         self.path_entry.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-        
+
         self.scan_start_time = None
         self.status_var.set("Starting scan...")
 
         # Start polling queue
-        self.root.after(20, self.poll_queue)
+        self.root.after(20, self.poll_scanner_queue)
     
     def stop_scan(self):
         """Stop the scanning process."""
         if self.stop_event:
             self.stop_event.set()
         self.status_var.set("Stopping scan...")
-    
+
+    def poll_scanner_queue(self):
+        """Generic queue polling method for both initial scan and refresh."""
+        if self.result_queue is None:
+            return
+
+        # Process only ONE batch per poll for smoother updates
+        try:
+            result = self.result_queue.get_nowait()
+
+            if result == 'DONE':
+                # Finish based on mode
+                if self.scan_mode == ScanMode.INITIAL_SCAN:
+                    self.finish_scan(success=True)
+                elif self.scan_mode == ScanMode.REFRESH:
+                    self.finish_refresh(success=True)
+                return
+
+            elif isinstance(result, tuple) and result[0] == 'START':
+                if self.scan_mode == ScanMode.INITIAL_SCAN:
+                    self.scan_start_time = __import__('time').perf_counter()
+                    self.status_var.set(f"Scanning: {result[1]}")
+                # Ignore START for refresh
+
+            elif isinstance(result, tuple) and result[0] == 'ERROR':
+                # Finish based on mode
+                if self.scan_mode == ScanMode.INITIAL_SCAN:
+                    self.finish_scan(success=False, error=result[1])
+                elif self.scan_mode == ScanMode.REFRESH:
+                    self.finish_refresh(success=False, error=result[1])
+                return
+
+            elif isinstance(result, list):
+                # Clear affected parents for batch sorting
+                self.affected_parents.clear()
+
+                # Process batch based on mode
+                if self.scan_mode == ScanMode.INITIAL_SCAN:
+                    for path, size in result:
+                        self.add_or_update_node(path, size)
+                        self.total_processed += 1
+                    # Update status
+                    elapsed = __import__('time').perf_counter() - self.scan_start_time if self.scan_start_time else 0
+                    self.status_var.set(f"Scanning... {self.total_processed:,} directories processed ({elapsed:.1f}s)")
+
+                elif self.scan_mode == ScanMode.REFRESH:
+                    for scan_path, exclusive_size in result:
+                        scan_path = os.path.normpath(scan_path)
+                        if scan_path == self.refresh_path:
+                            # This is the root of the refresh
+                            self.refresh_new_exclusive_size += exclusive_size
+                            self.refresh_new_total_size += exclusive_size
+                        else:
+                            # Subdirectory - add as child
+                            self.add_or_update_node(scan_path, exclusive_size)
+                            self.refresh_new_total_size += exclusive_size
+
+                # Sort all affected parents once after batch
+                for parent_id in self.affected_parents:
+                    self.sort_children(parent_id)
+
+        except:
+            # Queue empty - this is normal
+            pass
+
+        # Continue polling if scan is active OR if process just finished (queue may still have items)
+        if self.scanner_process:
+            self.root.after(20, self.poll_scanner_queue)
+
     def poll_queue(self):
         """Poll queue for results from scanner process."""
         if self.result_queue is None:
@@ -254,9 +336,11 @@ class DirectoryTreeViewer:
         path = os.path.normpath(path)
 
         # Get or create node for this path
-        if path in self.path_to_node:
+        if path in self.path_to_node and self.path_to_node[path] is not None:
+            # Existing valid node
             node_id = self.path_to_node[path]
         else:
+            # Either doesn't exist or is marked as deleted (None)
             node_id = self.create_node(path)
 
         # Update exclusive size for this node
@@ -380,6 +464,10 @@ class DirectoryTreeViewer:
 
     def show_context_menu(self, event):
         """Show context menu on right-click."""
+        # Don't show context menu if a scan is in progress
+        if self.scan_mode != ScanMode.IDLE:
+            return
+
         # Select the item under cursor
         item = self.tree.identify_row(event.y)
         if item:
@@ -439,16 +527,30 @@ class DirectoryTreeViewer:
                 messagebox.showwarning("Scan in Progress", "Cannot refresh while a scan is running")
             return
 
+        logging.info(f"Starting refresh for: {path}")
+
         # Store refresh state
         self.refresh_node_id = node_id
         self.refresh_path = path
         self.refresh_new_total_size = 0
         self.refresh_new_exclusive_size = 0
 
-        # Remove all children
-        children = self.tree.get_children(node_id)
-        for child in children:
-            self.remove_node_recursive(child)
+        # Mark all descendant paths as deleted (fast - just set sentinel value)
+        # This invalidates the old node IDs without expensive removal
+        for p in list(self.path_to_node.keys()):
+            if p.startswith(self.refresh_path + os.sep):
+                self.path_to_node[p] = None  # None = deleted marker
+
+        logging.info(f"Marked descendants as deleted in path_to_node")
+
+        # Delete all children from tree (fast - tkinter handles descendants automatically)
+        for child in self.tree.get_children(node_id):
+            self.tree.delete(child)
+
+        # Note: We intentionally don't clean up node_sizes and node_exclusive_sizes
+        # The orphaned entries are harmless and will be overwritten when rescanning
+
+        logging.info(f"Removed all descendants, starting scanner")
 
         # Setup multiprocessing
         self.result_queue = Queue()
@@ -460,6 +562,8 @@ class DirectoryTreeViewer:
             args=(path, self.result_queue, self.stop_event)
         )
         self.scanner_process.start()
+        self.scan_mode = ScanMode.REFRESH
+        logging.info(f"Refresh scanner process started, mode set to: {self.scan_mode}")
 
         # Disable scan controls during refresh
         self.scan_btn.config(state=tk.DISABLED)
@@ -469,7 +573,8 @@ class DirectoryTreeViewer:
         self.status_var.set(f"Refreshing: {path}")
 
         # Start async polling
-        self.root.after(20, self.poll_refresh_queue)
+        logging.info("Scheduling first poll_scanner_queue call")
+        self.root.after(20, self.poll_scanner_queue)
 
     def poll_refresh_queue(self):
         """Poll queue for results from refresh operation."""
@@ -525,6 +630,8 @@ class DirectoryTreeViewer:
 
     def finish_refresh(self, success=True, error=None):
         """Finish the refresh operation and cleanup."""
+        logging.info(f"Finishing refresh, success={success}")
+
         # Cleanup process
         if self.scanner_process:
             self.scanner_process.join(timeout=1.0)
@@ -535,6 +642,9 @@ class DirectoryTreeViewer:
         # Cleanup queue
         self.result_queue = None
         self.stop_event = None
+
+        # Reset scan mode to IDLE
+        self.scan_mode = ScanMode.IDLE
 
         # Update UI state
         self.scan_btn.config(state=tk.NORMAL)
@@ -624,6 +734,9 @@ class DirectoryTreeViewer:
         # Cleanup queue
         self.result_queue = None
         self.stop_event = None
+
+        # Reset scan mode to IDLE
+        self.scan_mode = ScanMode.IDLE
 
         # Clear affected parents tracking
         self.affected_parents.clear()
