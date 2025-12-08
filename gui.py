@@ -667,6 +667,10 @@ class DirectoryTreeViewer:
         while True:
             parent_path = os.path.dirname(current_path)
 
+            # Stop if we're at the scan root
+            if current_path == self.scan_root:
+                break
+
             # Stop if we're at the root or no parent
             if not parent_path or parent_path == current_path:
                 break
@@ -684,10 +688,6 @@ class DirectoryTreeViewer:
                 new_parent_total = parent_exclusive + children_total
                 self.node_sizes[parent_id] = new_parent_total
                 self.update_node_display(parent_id, new_parent_total, parent_exclusive)
-
-            # Stop after processing the scan root
-            if current_path == self.scan_root:
-                break
 
             current_path = parent_path
 
