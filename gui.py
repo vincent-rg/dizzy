@@ -603,10 +603,19 @@ class DirectoryTreeViewer:
             for p in paths_to_mark:
                 self.path_to_node[p] = None
 
-            # Recompute parent sizes (if parent exists)
+            # Recompute parent and ancestor sizes (if parent exists)
             if parent_id:
                 parent_path = self.get_path_from_node(parent_id)
                 if parent_path:
+                    # Recompute the parent's size directly by summing its children
+                    parent_exclusive = self.node_exclusive_sizes.get(parent_id, 0)
+                    children_total = sum(self.node_sizes.get(child_id, 0)
+                                        for child_id in self.tree.get_children(parent_id))
+                    new_parent_total = parent_exclusive + children_total
+                    self.node_sizes[parent_id] = new_parent_total
+                    self.update_node_display(parent_id, new_parent_total, parent_exclusive)
+
+                    # Then recompute ancestors of the parent
                     self.recompute_ancestors_total_size(parent_path)
 
             self.status_var.set(f"Deleted: {path}")
