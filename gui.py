@@ -93,11 +93,22 @@ class DirectoryTreeViewer:
         # Status bar
         status_frame = ttk.Frame(self.root, padding="5 0 5 5")
         status_frame.pack(fill=tk.X)
-        
+
         self.status_var = tk.StringVar(value="Ready")
         self.status_label = ttk.Label(status_frame, textvariable=self.status_var)
         self.status_label.pack(side=tk.LEFT)
-        
+
+        # Disk space frame
+        disk_frame = ttk.Frame(self.root, padding="5 0 5 5")
+        disk_frame.pack(fill=tk.X)
+
+        self.disk_space_var = tk.StringVar(value="")
+        self.disk_space_label = ttk.Label(disk_frame, textvariable=self.disk_space_var)
+        self.disk_space_label.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.refresh_disk_btn = ttk.Button(disk_frame, text="Refresh Free Space", command=self.refresh_disk_space)
+        self.refresh_disk_btn.pack(side=tk.LEFT)
+
         # Tree frame with scrollbars
         tree_frame = ttk.Frame(self.root)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
@@ -153,7 +164,48 @@ class DirectoryTreeViewer:
         directory = filedialog.askdirectory()
         if directory:
             self.path_var.set(directory)
-    
+
+    def get_disk_space(self, path):
+        """Get free disk space for the drive containing the given path."""
+        try:
+            if not path or not os.path.exists(path):
+                return None
+
+            # Get disk usage statistics
+            stat = shutil.disk_usage(path)
+            return {
+                'total': stat.total,
+                'used': stat.used,
+                'free': stat.free
+            }
+        except Exception as e:
+            logging.error(f"Error getting disk space for {path}: {e}")
+            return None
+
+    def update_disk_space_display(self):
+        """Update the disk space display for the current scan root."""
+        if not self.scan_root:
+            self.disk_space_var.set("")
+            return
+
+        disk_info = self.get_disk_space(self.scan_root)
+        if disk_info:
+            free_space = format_size(disk_info['free'])
+            total_space = format_size(disk_info['total'])
+            used_space = format_size(disk_info['used'])
+            percent_used = (disk_info['used'] / disk_info['total'] * 100) if disk_info['total'] > 0 else 0
+
+            self.disk_space_var.set(
+                f"Drive: {os.path.splitdrive(self.scan_root)[0] or '/'} | "
+                f"Free: {free_space} | Used: {used_space} / {total_space} ({percent_used:.1f}%)"
+            )
+        else:
+            self.disk_space_var.set("Unable to get disk space information")
+
+    def refresh_disk_space(self):
+        """Refresh the disk space display."""
+        self.update_disk_space_display()
+
     def start_scan(self):
         """Start scanning process."""
         path = self.path_var.get().strip()
@@ -178,7 +230,10 @@ class DirectoryTreeViewer:
         self.total_processed = 0
         self.scan_root = os.path.normpath(path)
         self.affected_parents.clear()
-        
+
+        # Update disk space display
+        self.update_disk_space_display()
+
         # Setup multiprocessing
         self.result_queue = Queue()
         self.stop_event = Event()
@@ -623,6 +678,9 @@ class DirectoryTreeViewer:
                         self.sort_children(affected_parent_id)
                     self.affected_parents.clear()
 
+            # Update disk space display after deletion
+            self.update_disk_space_display()
+
             self.status_var.set(f"Deleted: {path}")
 
         except PermissionError:
@@ -661,6 +719,9 @@ class DirectoryTreeViewer:
 
             # Recompute ancestors' total sizes from scratch
             self.recompute_ancestors_total_size(self.refresh_path)
+
+            # Update disk space display after refresh
+            self.update_disk_space_display()
 
             self.status_var.set(f"Refresh complete: {self.refresh_path}")
         else:
