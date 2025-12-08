@@ -11,6 +11,7 @@ from multiprocessing import Process, Queue, Event
 from scanner import scan_directory_tree
 from enum import Enum
 import logging
+import shutil
 
 # Setup logging (WARNING level for production)
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -140,6 +141,8 @@ class DirectoryTreeViewer:
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Browse Folder", command=self.browse_folder_context)
         self.context_menu.add_command(label="Refresh", command=self.refresh_folder_context)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="Delete Folder", command=self.delete_folder_context)
 
         # Bind right-click
         self.tree.bind("<Button-3>", self.show_context_menu)
@@ -525,6 +528,63 @@ class DirectoryTreeViewer:
         # Start async polling
         logging.info("Scheduling first poll_scanner_queue call")
         self.root.after(20, self.poll_scanner_queue)
+
+    def delete_folder_context(self):
+        """Delete the selected folder permanently."""
+        selection = self.tree.selection()
+        if not selection:
+            return
+
+        node_id = selection[0]
+        path = self.get_path_from_node(node_id)
+
+        if not path or not os.path.exists(path):
+            messagebox.showerror("Error", "Folder no longer exists")
+            return
+
+        if not os.path.isdir(path):
+            messagebox.showerror("Error", "Not a directory")
+            return
+
+        # Get folder size for confirmation message
+        total_size = self.node_sizes.get(node_id, 0)
+        size_str = format_size(total_size)
+
+        # Confirm deletion
+        result = messagebox.askyesno(
+            "Confirm Deletion",
+            f"Are you sure you want to permanently delete:\n\n{path}\n\nSize: {size_str}\n\nThis action cannot be undone!",
+            icon='warning'
+        )
+
+        if not result:
+            return
+
+        try:
+            # Delete the folder recursively (efficient)
+            shutil.rmtree(path)
+
+            # Remove from tree
+            parent_id = self.tree.parent(node_id)
+            self.tree.delete(node_id)
+
+            # Mark as deleted in path_to_node and all descendants
+            paths_to_mark = [p for p in self.path_to_node.keys() if p == path or p.startswith(path + os.sep)]
+            for p in paths_to_mark:
+                self.path_to_node[p] = None
+
+            # Recompute parent sizes (if parent exists)
+            if parent_id:
+                parent_path = self.get_path_from_node(parent_id)
+                if parent_path:
+                    self.recompute_ancestors_total_size(parent_path)
+
+            self.status_var.set(f"Deleted: {path}")
+
+        except PermissionError:
+            messagebox.showerror("Permission Denied", f"Cannot delete folder (permission denied):\n{path}")
+        except Exception as e:
+            messagebox.showerror("Delete Error", f"Failed to delete folder:\n{e}")
 
     def finish_refresh(self, success=True, error=None):
         """Finish the refresh operation and cleanup."""
