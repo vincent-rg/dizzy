@@ -618,6 +618,11 @@ class DirectoryTreeViewer:
                     # Then recompute ancestors of the parent
                     self.recompute_ancestors_total_size(parent_path)
 
+                    # Sort all affected parents after size updates
+                    for affected_parent_id in self.affected_parents:
+                        self.sort_children(affected_parent_id)
+                    self.affected_parents.clear()
+
             self.status_var.set(f"Deleted: {path}")
 
         except PermissionError:
