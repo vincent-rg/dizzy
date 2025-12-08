@@ -361,12 +361,12 @@ class DirectoryTreeViewer:
     
     def create_node(self, path):
         """Create a node and all its missing ancestors up to scan_root."""
-        # Check if already exists
-        if path in self.path_to_node:
-            return self.path_to_node[path]
-
-        # Normalize path
+        # Normalize path first
         path = os.path.normpath(path)
+
+        # Check if already exists and is valid (not marked as deleted)
+        if path in self.path_to_node and self.path_to_node[path] is not None:
+            return self.path_to_node[path]
 
         # If this is the scan root, create it at tree root
         if path == self.scan_root:
