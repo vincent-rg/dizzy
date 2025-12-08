@@ -140,6 +140,7 @@ class DirectoryTreeViewer:
         # Context menu
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Browse Folder", command=self.browse_folder_context)
+        self.context_menu.add_command(label="Open in Terminal", command=self.open_terminal_context)
         self.context_menu.add_command(label="Refresh", command=self.refresh_folder_context)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Delete Folder", command=self.delete_folder_context)
@@ -450,6 +451,35 @@ class DirectoryTreeViewer:
                     subprocess.Popen(['xdg-open', path])
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to open folder:\n{e}")
+
+    def open_terminal_context(self):
+        """Open Windows Terminal at the selected folder."""
+        selection = self.tree.selection()
+        if not selection:
+            return
+
+        node_id = selection[0]
+        path = self.get_path_from_node(node_id)
+
+        if path and os.path.exists(path):
+            try:
+                if platform.system() == 'Windows':
+                    # Use Windows Terminal (wt.exe) for Windows 11
+                    subprocess.Popen(['wt.exe', '-d', path])
+                elif platform.system() == 'Darwin':  # macOS
+                    # Use Terminal.app on macOS
+                    subprocess.Popen(['open', '-a', 'Terminal', path])
+                else:  # Linux
+                    # Try common Linux terminals
+                    subprocess.Popen(['gnome-terminal', '--working-directory=' + path])
+            except FileNotFoundError:
+                # Fallback if wt.exe is not found (older Windows)
+                if platform.system() == 'Windows':
+                    subprocess.Popen(['cmd.exe', '/K', 'cd', '/D', path])
+                else:
+                    messagebox.showerror("Error", "Could not find terminal application")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to open terminal:\n{e}")
 
     def refresh_folder_context(self):
         """Refresh the selected folder by rescanning it (async)."""
