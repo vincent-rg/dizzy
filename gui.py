@@ -737,6 +737,13 @@ class DirectoryTreeViewer:
         if not result:
             return
 
+        # Store original names and update display with " (deleting...)"
+        original_names = {}
+        for node_id, path, _ in folders_to_delete:
+            original_name = os.path.basename(path)
+            original_names[node_id] = original_name
+            self.tree.item(node_id, text=f"{original_name} (deleting...)")
+
         # Track all affected parents for size recomputation
         affected_parents_set = set()
         errors = []
@@ -763,8 +770,14 @@ class DirectoryTreeViewer:
 
             except PermissionError:
                 errors.append(f"Permission denied: {path}")
+                # Restore original name since folder wasn't deleted
+                if node_id in original_names:
+                    self.tree.item(node_id, text=original_names[node_id])
             except Exception as e:
                 errors.append(f"{path}: {str(e)}")
+                # Restore original name since folder wasn't deleted
+                if node_id in original_names:
+                    self.tree.item(node_id, text=original_names[node_id])
 
         # Recompute sizes for all affected parents and their ancestors
         processed_parents = set()
