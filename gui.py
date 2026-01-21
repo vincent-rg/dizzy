@@ -28,12 +28,35 @@ def format_size(bytes_size):
     """Format bytes into human-readable format."""
     if bytes_size == 0:
         return "0 B"
-    
+
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
         if bytes_size < 1024.0:
             return f"{bytes_size:.2f} {unit}"
         bytes_size /= 1024.0
     return f"{bytes_size:.2f} PB"
+
+
+def handle_remove_readonly(func, path, exc_info):
+    """
+    Error handler for shutil.rmtree to handle read-only and protected files.
+    This allows deletion of files that Windows Explorer can delete without admin rights.
+    """
+    import stat
+
+    # Check if the error is a permission error
+    excvalue = exc_info[1]
+    if isinstance(excvalue, PermissionError):
+        # Try to make the file writable by removing read-only attribute
+        try:
+            os.chmod(path, stat.S_IWUSR | stat.S_IRUSR)
+            # Retry the failed operation
+            func(path)
+        except Exception:
+            # If we still can't delete it, re-raise the original exception
+            raise excvalue
+    else:
+        # For other errors, re-raise
+        raise excvalue
 
 
 class DirectoryTreeViewer:
@@ -647,7 +670,8 @@ class DirectoryTreeViewer:
 
         try:
             # Delete the folder recursively (efficient)
-            shutil.rmtree(path)
+            # Use onerror handler to remove read-only attributes if needed
+            shutil.rmtree(path, onerror=handle_remove_readonly)
 
             # Remove from tree
             parent_id = self.tree.parent(node_id)
