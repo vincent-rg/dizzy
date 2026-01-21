@@ -82,6 +82,7 @@ class DirectoryTreeViewer:
         self.refresh_path = None
         self.refresh_new_total_size = 0
         self.refresh_new_exclusive_size = 0
+        self.refresh_queue = []  # Queue of folders to refresh (for multi-folder refresh)
 
         # Statistics
         self.scan_start_time = None
@@ -144,7 +145,8 @@ class DirectoryTreeViewer:
         self.tree = ttk.Treeview(tree_frame,
                                  columns=('total_size', 'exclusive_size', 'total_size_bytes', 'exclusive_size_bytes'),
                                  yscrollcommand=vsb.set,
-                                 xscrollcommand=hsb.set)
+                                 xscrollcommand=hsb.set,
+                                 selectmode='extended')
         
         vsb.config(command=self.tree.yview)
         hsb.config(command=self.tree.xview)
@@ -496,11 +498,37 @@ class DirectoryTreeViewer:
         if self.scan_mode != ScanMode.IDLE:
             return
 
-        # Select the item under cursor
+        # Get the item under cursor
         item = self.tree.identify_row(event.y)
-        if item:
+        if not item:
+            return
+
+        # If right-clicking on an item that's not in the current selection,
+        # clear selection and select just this item
+        current_selection = self.tree.selection()
+        if item not in current_selection:
             self.tree.selection_set(item)
-            self.context_menu.post(event.x_root, event.y_root)
+            current_selection = (item,)
+
+        # Enable/disable menu items based on selection count
+        selection_count = len(current_selection)
+
+        # When multiple items are selected, only "Refresh" and "Delete Folder" are enabled
+        if selection_count > 1:
+            # Disable Browse Folder and Open in Terminal
+            self.context_menu.entryconfig(0, state=tk.DISABLED)  # Browse Folder
+            self.context_menu.entryconfig(1, state=tk.DISABLED)  # Open in Terminal
+            # Enable Refresh and Delete Folder
+            self.context_menu.entryconfig(2, state=tk.NORMAL)    # Refresh
+            self.context_menu.entryconfig(4, state=tk.NORMAL)    # Delete Folder
+        else:
+            # Enable all menu items for single selection
+            self.context_menu.entryconfig(0, state=tk.NORMAL)    # Browse Folder
+            self.context_menu.entryconfig(1, state=tk.NORMAL)    # Open in Terminal
+            self.context_menu.entryconfig(2, state=tk.NORMAL)    # Refresh
+            self.context_menu.entryconfig(4, state=tk.NORMAL)    # Delete Folder
+
+        self.context_menu.post(event.x_root, event.y_root)
 
     def get_path_from_node(self, node_id):
         """Get the full path from a tree node."""
@@ -560,20 +588,9 @@ class DirectoryTreeViewer:
                 messagebox.showerror("Error", f"Failed to open terminal:\n{e}")
 
     def refresh_folder_context(self):
-        """Refresh the selected folder by rescanning it (async)."""
+        """Refresh the selected folder(s) by rescanning them (async)."""
         selection = self.tree.selection()
         if not selection:
-            return
-
-        node_id = selection[0]
-        path = self.get_path_from_node(node_id)
-
-        if not path or not os.path.exists(path):
-            messagebox.showerror("Error", "Folder no longer exists")
-            return
-
-        if not os.path.isdir(path):
-            messagebox.showerror("Error", "Not a directory")
             return
 
         # Don't allow refresh during active scan or another refresh
@@ -583,6 +600,38 @@ class DirectoryTreeViewer:
             else:
                 messagebox.showwarning("Scan in Progress", "Cannot refresh while a scan is running")
             return
+
+        # Collect valid folders to refresh
+        folders_to_refresh = []
+        for node_id in selection:
+            path = self.get_path_from_node(node_id)
+
+            if not path or not os.path.exists(path):
+                continue
+
+            if not os.path.isdir(path):
+                continue
+
+            folders_to_refresh.append((node_id, path))
+
+        if not folders_to_refresh:
+            messagebox.showerror("Error", "No valid folders to refresh")
+            return
+
+        # Initialize refresh queue with all folders
+        self.refresh_queue = folders_to_refresh
+        logging.info(f"Starting refresh for {len(folders_to_refresh)} folder(s)")
+
+        # Start refreshing the first folder
+        self._start_next_refresh()
+
+    def _start_next_refresh(self):
+        """Start refreshing the next folder in the refresh queue."""
+        if not self.refresh_queue:
+            return
+
+        # Get next folder to refresh
+        node_id, path = self.refresh_queue.pop(0)
 
         logging.info(f"Starting refresh for: {path}")
 
@@ -631,86 +680,130 @@ class DirectoryTreeViewer:
         self.browse_btn.config(state=tk.DISABLED)
         self.path_entry.config(state=tk.DISABLED)
 
-        self.status_var.set(f"Refreshing: {path}")
+        remaining = len(self.refresh_queue)
+        if remaining > 0:
+            self.status_var.set(f"Refreshing: {path} ({remaining} more remaining)")
+        else:
+            self.status_var.set(f"Refreshing: {path}")
 
         # Start async polling
         logging.info("Scheduling first poll_scanner_queue call")
         self.root.after(20, self.poll_scanner_queue)
 
     def delete_folder_context(self):
-        """Delete the selected folder permanently."""
+        """Delete the selected folder(s) permanently."""
         selection = self.tree.selection()
         if not selection:
             return
 
-        node_id = selection[0]
-        path = self.get_path_from_node(node_id)
+        # Collect valid folders to delete
+        folders_to_delete = []
+        total_combined_size = 0
 
-        if not path or not os.path.exists(path):
-            messagebox.showerror("Error", "Folder no longer exists")
+        for node_id in selection:
+            path = self.get_path_from_node(node_id)
+
+            if not path or not os.path.exists(path):
+                continue
+
+            if not os.path.isdir(path):
+                continue
+
+            folder_size = self.node_sizes.get(node_id, 0)
+            folders_to_delete.append((node_id, path, folder_size))
+            total_combined_size += folder_size
+
+        if not folders_to_delete:
+            messagebox.showerror("Error", "No valid folders to delete")
             return
 
-        if not os.path.isdir(path):
-            messagebox.showerror("Error", "Not a directory")
-            return
-
-        # Get folder size for confirmation message
-        total_size = self.node_sizes.get(node_id, 0)
-        size_str = format_size(total_size)
+        # Build confirmation message
+        if len(folders_to_delete) == 1:
+            node_id, path, folder_size = folders_to_delete[0]
+            size_str = format_size(folder_size)
+            confirm_msg = f"Are you sure you want to permanently delete:\n\n{path}\n\nSize: {size_str}\n\nThis action cannot be undone!"
+        else:
+            folder_list = "\n".join([f"- {path}" for _, path, _ in folders_to_delete])
+            size_str = format_size(total_combined_size)
+            confirm_msg = f"Are you sure you want to permanently delete {len(folders_to_delete)} folders:\n\n{folder_list}\n\nTotal Size: {size_str}\n\nThis action cannot be undone!"
 
         # Confirm deletion
         result = messagebox.askyesno(
             "Confirm Deletion",
-            f"Are you sure you want to permanently delete:\n\n{path}\n\nSize: {size_str}\n\nThis action cannot be undone!",
+            confirm_msg,
             icon='warning'
         )
 
         if not result:
             return
 
-        try:
-            # Delete the folder recursively (efficient)
-            # Use onerror handler to remove read-only attributes if needed
-            shutil.rmtree(path, onerror=handle_remove_readonly)
+        # Track all affected parents for size recomputation
+        affected_parents_set = set()
+        errors = []
 
-            # Remove from tree
-            parent_id = self.tree.parent(node_id)
-            self.tree.delete(node_id)
+        # Delete each folder
+        for node_id, path, _ in folders_to_delete:
+            try:
+                # Delete the folder recursively (efficient)
+                # Use onerror handler to remove read-only attributes if needed
+                shutil.rmtree(path, onerror=handle_remove_readonly)
 
-            # Mark as deleted in path_to_node and all descendants
-            paths_to_mark = [p for p in self.path_to_node.keys() if p == path or p.startswith(path + os.sep)]
-            for p in paths_to_mark:
-                self.path_to_node[p] = None
+                # Get parent before deleting from tree
+                parent_id = self.tree.parent(node_id)
+                if parent_id or parent_id == '':
+                    affected_parents_set.add(parent_id)
 
-            # Recompute parent and ancestor sizes (if parent exists)
-            if parent_id:
-                parent_path = self.get_path_from_node(parent_id)
-                if parent_path:
-                    # Recompute the parent's size directly by summing its children
-                    parent_exclusive = self.node_exclusive_sizes.get(parent_id, 0)
-                    children_total = sum(self.node_sizes.get(child_id, 0)
-                                        for child_id in self.tree.get_children(parent_id))
-                    new_parent_total = parent_exclusive + children_total
-                    self.node_sizes[parent_id] = new_parent_total
-                    self.update_node_display(parent_id, new_parent_total, parent_exclusive)
+                # Remove from tree
+                self.tree.delete(node_id)
 
-                    # Then recompute ancestors of the parent
-                    self.recompute_ancestors_total_size(parent_path)
+                # Mark as deleted in path_to_node and all descendants
+                paths_to_mark = [p for p in self.path_to_node.keys() if p == path or p.startswith(path + os.sep)]
+                for p in paths_to_mark:
+                    self.path_to_node[p] = None
 
-                    # Sort all affected parents after size updates
-                    for affected_parent_id in self.affected_parents:
-                        self.sort_children(affected_parent_id)
-                    self.affected_parents.clear()
+            except PermissionError:
+                errors.append(f"Permission denied: {path}")
+            except Exception as e:
+                errors.append(f"{path}: {str(e)}")
 
-            # Update disk space display after deletion
-            self.update_disk_space_display()
+        # Recompute sizes for all affected parents and their ancestors
+        processed_parents = set()
+        for parent_id in affected_parents_set:
+            if parent_id in processed_parents:
+                continue
 
-            self.status_var.set(f"Deleted: {path}")
+            parent_path = self.get_path_from_node(parent_id)
+            if parent_path:
+                # Recompute the parent's size directly by summing its children
+                parent_exclusive = self.node_exclusive_sizes.get(parent_id, 0)
+                children_total = sum(self.node_sizes.get(child_id, 0)
+                                    for child_id in self.tree.get_children(parent_id))
+                new_parent_total = parent_exclusive + children_total
+                self.node_sizes[parent_id] = new_parent_total
+                self.update_node_display(parent_id, new_parent_total, parent_exclusive)
 
-        except PermissionError:
-            messagebox.showerror("Permission Denied", f"Cannot delete folder (permission denied):\n{path}")
-        except Exception as e:
-            messagebox.showerror("Delete Error", f"Failed to delete folder:\n{e}")
+                # Then recompute ancestors of the parent
+                self.recompute_ancestors_total_size(parent_path)
+                processed_parents.add(parent_id)
+
+        # Sort all affected parents after size updates
+        for affected_parent_id in self.affected_parents:
+            self.sort_children(affected_parent_id)
+        self.affected_parents.clear()
+
+        # Update disk space display after deletion
+        self.update_disk_space_display()
+
+        # Update status and show errors if any
+        if errors:
+            error_msg = "\n".join(errors)
+            messagebox.showerror("Delete Errors", f"Some folders could not be deleted:\n\n{error_msg}")
+            self.status_var.set(f"Deleted {len(folders_to_delete) - len(errors)} of {len(folders_to_delete)} folders")
+        else:
+            if len(folders_to_delete) == 1:
+                self.status_var.set(f"Deleted: {folders_to_delete[0][1]}")
+            else:
+                self.status_var.set(f"Deleted {len(folders_to_delete)} folders")
 
     def finish_refresh(self, success=True, error=None):
         """Finish the refresh operation and cleanup."""
@@ -730,11 +823,6 @@ class DirectoryTreeViewer:
         # Reset scan mode to IDLE
         self.scan_mode = ScanMode.IDLE
 
-        # Update UI state
-        self.scan_btn.config(state=tk.NORMAL)
-        self.browse_btn.config(state=tk.NORMAL)
-        self.path_entry.config(state=tk.NORMAL)
-
         if success:
             # Update the refreshed node's sizes
             self.node_sizes[self.refresh_node_id] = self.refresh_new_total_size
@@ -753,11 +841,23 @@ class DirectoryTreeViewer:
             if error:
                 messagebox.showerror("Refresh Error", f"An error occurred during refresh:\n{error}")
 
-        # Clear refresh state
+        # Clear refresh state for current folder
         self.refresh_node_id = None
         self.refresh_path = None
         self.refresh_new_total_size = 0
         self.refresh_new_exclusive_size = 0
+
+        # Check if there are more folders to refresh
+        if self.refresh_queue:
+            # Start refreshing the next folder
+            logging.info(f"Continuing with next folder in refresh queue ({len(self.refresh_queue)} remaining)")
+            self._start_next_refresh()
+        else:
+            # All refreshes complete - update UI state
+            self.scan_btn.config(state=tk.NORMAL)
+            self.browse_btn.config(state=tk.NORMAL)
+            self.path_entry.config(state=tk.NORMAL)
+            logging.info("All refreshes complete")
 
     def recompute_ancestors_total_size(self, path):
         """Recompute total sizes for all ancestors by summing children."""
