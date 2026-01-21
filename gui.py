@@ -744,6 +744,9 @@ class DirectoryTreeViewer:
             original_names[node_id] = original_name
             self.tree.item(node_id, text=f"{original_name} (deleting...)")
 
+        # Force UI update so the user sees the "deleting..." status
+        self.tree.update_idletasks()
+
         # Track all affected parents for size recomputation
         affected_parents_set = set()
         errors = []
